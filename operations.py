@@ -1,6 +1,6 @@
 # operations.py
 import sqlite3
-from datetime import date
+from datetime import date, timedelta, datetime
 from database import create_connection
 
 def search_books(query: str):
@@ -51,94 +51,170 @@ def search_books(query: str):
 
 # Teammates will implement these
 
-def checkout_book(isbn, card_id): return "[Pending] Teammate"
-
-def checkin_book(query):    # Teammate : Kimberly (Grace) Niemiec
-    
+def checkout_book(isbn, card_id): #hafsah navaid
     conn = create_connection()
     c = conn.cursor()
 
-    pattern = f"%{query.strip()}%"
-
-    # Find active loans for ISBN / card number / borrower name / substring
-
-    sql1 = """
-    SELECT bl.Loan_id, bl.Isbn, b.Title, br.Card_id, br.Name, bl.Due_date
-    FROM BOOK_LOANS bl
-    JOIN BOOK b ON bl.Isbn = b.Isbn
-    JOIN BORROWER br ON bl.Card_id = br.Card_id
-    WHERE bl.Date_in IS NULL
-        AND (
-            LOWER(bl.Isbn) LIKE LOWER(?)
-            OR LOWER(br.Card_id) LIKE LOWER(?)
-            OR LOWER(br.Name) LIKE LOWER(?)
-        );
-    """
-    
-    c.execute(sql1, (pattern, pattern, pattern))
-    
-    active_loans = c.fetchall()
-    
-    if len(active_loans) == 0:
+    #borrower cannot checkout if unpaid fines
+    c.execute("""
+        SELECT SUM(Fine_amt)
+        FROM FINES f
+        JOIN BOOK_LOANS bl ON f.Loan_id = bl.Loan_id
+        WHERE bl.Card_id = ? AND Paid = 0
+    """, (card_id,))
+    row = c.fetchone()
+    if row[0] and row[0] > 0:
         conn.close()
-        return "Checkin failed. No active loans found matching this search."
-    
-    # Display active loans if found
+        return "Checkout failed: borrower has unpaid fines."
 
-    print("\nActive loans matching your search : ")
-    print("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
+    #borrower cannot exceed 3 loans
+    c.execute("""
+        SELECT COUNT(*) FROM BOOK_LOANS
+        WHERE Card_id = ? AND Date_in IS NULL
+    """, (card_id,))
+    count = c.fetchone()[0]
+    if count >= 3:
+        conn.close()
+        return "Checkout failed: borrower already has 3 books."
 
-    for r, row in enumerate(active_loans, start=1):
-        loan_id,isbn, title, card_id, name, due = row
-        print(f"{r}. ISBN: {isbn} | Title: {title}")
-        print(f"    Borrower: {name} (Card {card_id}) | Due: {due}")
-        print("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
+    #if book is sold out then error
+    c.execute("""
+        SELECT 1 FROM BOOK_LOANS
+        WHERE Isbn = ? AND Date_in IS NULL
+    """, (isbn,))
+    if c.fetchone():
+        conn.close()
+        return "Checkout failed: book is already checked out."
 
-    # Prompt user to select which active loan to checkin
-    
-    if len(active_loans) == 1:  # One active loan
+    #checkout
+    today = date.today()
+    due_date = today + timedelta(days=14)
 
-        selection = 1
+    c.execute("""
+        INSERT INTO BOOK_LOANS (Isbn, Card_id, Date_out, Due_date)
+        VALUES (?, ?, ?, ?)
+    """, (isbn, card_id, today, due_date))
+    conn.commit()
+    conn.close()
+    return "Checkout successful!"
 
-        print("Selecting current active loan . . .")
+def checkin_book(isbn, card_id):    # Teammate : Kimberly (Grace) Niemiec
+    conn = create_connection()
+    c = conn.cursor()
 
-    else:                       # Multiple active loands
+    c.execute("""
+        SELECT Loan_id
+        FROM BOOK_LOANS
+        WHERE Isbn = ? AND Card_id = ? AND Date_in IS NULL
+    """, (isbn, card_id))
 
-        while True:
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return "Checkin failed: no active loan found."
 
-            uInput = input(f"Enter the number of the loan you want to checkin (1-{len(active_loans)}): ")
-            
-            if uInput.isdigit():
+    loan_id = row[0]
+    today = date.today()
 
-                selection = int(uInput)
-                
-                if 1 <= selection <= len(active_loans):
-
-                    break
-
-            print("Checkin failed. Please enter a valid active loan number.")
-
-    load_id = active_loans[selected_index - 1][0]   # Get loan_id of selected active loan
-
-    # Process checkin / return for book
-    
-    return_date = date.today()
-    
-    sql2 = """
-    UPDATE BOOK_LOANS
-    SET Date_in = ?
-    WHERE Loan_id = ?;
-    """
-    
-    c.execute(sql2, (return_date, load_id))
+    c.execute("""
+        UPDATE BOOK_LOANS
+        SET Date_in = ?
+        WHERE Loan_id = ?
+    """, (today, loan_id))
 
     conn.commit()
     conn.close()
+    return "Checkin successful!"
 
-    return "Checkin successful"
 
-def add_borrower(ssn, name, address, phone=None): return "[Pending] Teammate"
+def add_borrower(ssn, name, address, phone=None): #hafsah navaid
+    conn = create_connection()
+    c = conn.cursor()
 
-def pay_fines(card_id): return "[Pending] Teammate"
+    # cannot duplicate SSN
+    c.execute("SELECT 1 FROM BORROWER WHERE Ssn = ?", (ssn,))
+    if c.fetchone():
+        conn.close()
+        return "Borrower rejected: SSN already exists."
 
-def refresh_fines(): pass
+    # generate a new Card_id
+    c.execute("SELECT Card_id FROM BORROWER ORDER BY Card_id DESC LIMIT 1")
+    last = c.fetchone()
+    if last:
+        num = int(last[0][2:]) + 1
+    else:
+        num = 1
+
+    new_id = f"ID{num:03d}"
+
+    c.execute("""
+        INSERT INTO BORROWER (Card_id, Ssn, Bname, Address, Phone)
+        VALUES (?, ?, ?, ?, ?)
+    """, (new_id, ssn, name, address, phone))
+
+    conn.commit()
+    conn.close()
+    return f"Borrower created successfully. New Card ID = {new_id}"
+
+def pay_fines(card_id):
+    conn = create_connection()
+    c = conn.cursor()
+
+    # cannot pay if book is still out
+    c.execute("""
+        SELECT 1
+        FROM BOOK_LOANS bl
+        JOIN FINES f ON bl.Loan_id = f.Loan_id
+        WHERE bl.Card_id = ? AND bl.Date_in IS NULL
+    """, (card_id,))
+    if c.fetchone():
+        conn.close()
+        return "Cannot pay: borrower still has a checked-out book."
+
+    # mark all fines paid
+    c.execute("""
+        UPDATE FINES
+        SET Paid = 1
+        WHERE Loan_id IN (
+            SELECT Loan_id FROM BOOK_LOANS WHERE Card_id = ?
+        )
+    """, (card_id,))
+    conn.commit()
+    conn.close()
+    return "All fines successfully paid."
+
+def refresh_fines():
+    conn = create_connection()
+    c = conn.cursor()
+
+    c.execute("""
+        SELECT Loan_id, Due_date, Date_in
+        FROM BOOK_LOANS
+    """)
+    rows = c.fetchall()
+
+    for loan_id, due, date_in in rows:
+        due = datetime.strptime(due, "%Y-%m-%d").date()
+
+        if date_in:
+            date_in = datetime.strptime(date_in, "%Y-%m-%d").date()
+            days_late = (date_in - due).days
+        else:
+            days_late = (date.today() - due).days
+
+        if days_late <= 0:
+            continue
+
+        fine_amt = round(days_late * 0.25, 2)
+
+        c.execute("""
+            INSERT INTO FINES (Loan_id, Fine_amt)
+            VALUES (?, ?)
+            ON CONFLICT(Loan_id)
+            DO UPDATE SET Fine_amt=excluded.Fine_amt
+            WHERE Paid = 0
+        """, (loan_id, fine_amt))
+
+    conn.commit()
+    conn.close()
+    return "Fines refreshed."
